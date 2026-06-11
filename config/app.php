@@ -65,7 +65,7 @@ return [
     |
     */
 
-    'timezone' => 'UTC',
+    'timezone' => env('APP_TIMEZONE', 'Asia/Jakarta'), // UBAH INI
 
     /*
     |--------------------------------------------------------------------------
@@ -78,11 +78,9 @@ return [
     |
     */
 
-    'locale' => env('APP_LOCALE', 'en'),
-
-    'fallback_locale' => env('APP_FALLBACK_LOCALE', 'en'),
-
-    'faker_locale' => env('APP_FAKER_LOCALE', 'en_US'),
+    'locale' => env('APP_LOCALE', 'id'), // UBAH INI
+    'fallback_locale' => env('APP_FALLBACK_LOCALE', 'id'), // UBAH INI
+    'faker_locale' => env('APP_FAKER_LOCALE', 'id_ID'), // UBAH INI
 
     /*
     |--------------------------------------------------------------------------

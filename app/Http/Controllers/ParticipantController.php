@@ -4,85 +4,161 @@ namespace App\Http\Controllers;
 
 use Illuminate\Http\Request;
 use App\Models\Participant;
+use App\Models\Attendance;
 use App\Models\ActivityLog;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Validator;
+use Illuminate\Support\Str;
+use Illuminate\Validation\Rule;
 
 class ParticipantController extends Controller
 {
+    /**
+     * Menampilkan daftar peserta
+     */
     public function index(Request $request)
     {
         $query = Participant::withCount('attendances')->latest();
-        
-        // Search functionality
-        if ($request->has('search') && $request->search != '') {
+
+        if ($request->filled('search')) {
             $search = $request->search;
-            $query->where(function($q) use ($search) {
+            $query->where(function ($q) use ($search) {
                 $q->where('name', 'like', "%{$search}%")
                   ->orWhere('phone', 'like', "%{$search}%")
                   ->orWhere('address', 'like', "%{$search}%");
             });
         }
-        
-        $participants = $query->paginate(20);
-        
-        ActivityLog::create([
-            'user_id' => auth()->id(),
-            'activity' => 'Melihat daftar peserta',
-            'ip_address' => $request->ip(),
-            'user_agent' => $request->userAgent(),
-        ]);
 
-        return view('participants.index', compact('participants'));
+        $participants      = $query->paginate(20)->withQueryString();
+        $totalParticipants = Participant::count();
+        $totalAttendance   = Attendance::count();
+
+        $this->logActivity('Melihat daftar peserta');
+
+        return view('participants.index', compact(
+            'participants',
+            'totalParticipants',
+            'totalAttendance'
+        ));
     }
 
-    public function show(Participant $participant)
+    /**
+     * Menampilkan detail peserta
+     */
+    public function show($id)
     {
+        $participant = Participant::withCount('attendances')->findOrFail($id);
         $attendances = $participant->attendances()->with('event')->latest()->paginate(10);
-        
-        ActivityLog::create([
-            'user_id' => auth()->id(),
-            'activity' => 'Melihat detail peserta: ' . $participant->name,
-            'ip_address' => request()->ip(),
-        ]);
+
+        $this->logActivity('Melihat detail peserta: ' . $participant->name);
 
         return view('participants.show', compact('participant', 'attendances'));
     }
 
-    public function edit(Participant $participant)
+    /**
+     * Menampilkan form edit peserta
+     */
+    public function edit($id)
     {
+        $participant = Participant::findOrFail($id);
         return view('participants.edit', compact('participant'));
     }
 
-    public function update(Request $request, Participant $participant)
+    /**
+     * Update data peserta
+     */
+    public function update(Request $request, $id)
     {
-        $validated = $request->validate([
-            'name' => 'required|string|max:100',
-            'phone' => 'required|string|max:20|unique:participants,phone,' . $participant->id,
-            'address' => 'required|string|max:255',
+        $participant = Participant::findOrFail($id);
+
+        $validator = Validator::make($request->all(), [
+            'name'    => 'required|string|min:3|max:100',
+            'address' => 'nullable|string|max:255',
+            'phone'   => [
+                'required', 'string', 'regex:/^[0-9]{10,15}$/',
+                Rule::unique('participants')->ignore($participant->id)
+            ],
+        ], [
+            'phone.unique'  => 'Nomor telepon sudah digunakan peserta lain.',
+            'phone.regex'   => 'Nomor telepon harus 10-15 digit angka.',
+            'name.min'      => 'Nama minimal 3 karakter.',
+            'name.required' => 'Nama wajib diisi.',
         ]);
 
-        $participant->update($validated);
+        if ($validator->fails()) {
+            return redirect()->back()->withErrors($validator)->withInput();
+        }
 
-        ActivityLog::create([
-            'user_id' => auth()->id(),
-            'activity' => 'Memperbarui data peserta: ' . $participant->name,
-            'ip_address' => $request->ip(),
-            'user_agent' => $request->userAgent(),
-        ]);
-
-        return redirect()->route('participants.show', $participant)->with('success', 'Data peserta berhasil diperbarui.');
+        DB::beginTransaction();
+        try {
+            $participant->update([
+                'name'    => $this->formatName($request->name),
+                'address' => trim($request->address),
+                'phone'   => preg_replace('/\D/', '', $request->phone),
+            ]);
+            $this->logActivity('Memperbarui data peserta: ' . $participant->name);
+            DB::commit();
+            return redirect()->route('participants.show', $participant->id)
+                ->with('success', 'Data peserta berhasil diperbarui.');
+        } catch (\Exception $e) {
+            DB::rollBack();
+            return redirect()->back()
+                ->with('error', 'Terjadi kesalahan sistem. Silakan coba lagi.')
+                ->withInput();
+        }
     }
 
-    public function destroy(Participant $participant)
+    /**
+     * Hapus peserta
+     * - Kalau punya riwayat absensi -> tolak
+     * - Kalau belum pernah absen    -> hapus permanen
+     */
+    public function destroy($id)
     {
-        $name = $participant->name;
-        $participant->delete();
+        $participant = Participant::findOrFail($id);
 
-        ActivityLog::create([
-            'user_id' => auth()->id(),
-            'activity' => 'Menghapus peserta: ' . $name,
-            'ip_address' => request()->ip(),
-        ]);
+        if ($participant->attendances()->exists()) {
+            return redirect()->back()
+                ->with('error', 'Peserta "' . $participant->name . '" tidak dapat dihapus karena memiliki riwayat kehadiran.');
+        }
 
-        return redirect()->route('participants.index')->with('success', 'Peserta berhasil dihapus.');
+        DB::beginTransaction();
+        try {
+            $name = $participant->name;
+            $participant->delete();
+            $this->logActivity('Menghapus peserta: ' . $name);
+            DB::commit();
+            return redirect()->route('participants.index')
+                ->with('success', 'Peserta "' . $name . '" berhasil dihapus.');
+        } catch (\Exception $e) {
+            DB::rollBack();
+            return redirect()->back()
+                ->with('error', 'Terjadi kesalahan sistem. Silakan coba lagi.');
+        }
+    }
+
+    private function formatName($name)
+    {
+        $name = trim($name);
+        if (strtoupper($name) === $name && strlen($name) > 3) {
+            return Str::title($name);
+        }
+        return $name;
+    }
+
+    private function logActivity($activity)
+    {
+        if (!class_exists(ActivityLog::class)) return;
+        try {
+            ActivityLog::create([
+                'user_id'    => auth()->id(),
+                'activity'   => $activity,
+                'ip_address' => request()->ip(),
+                'user_agent' => request()->userAgent(),
+                'created_at' => now(),
+            ]);
+        } catch (\Exception $e) {
+            \Log::error('Failed to log activity: ' . $e->getMessage());
+        }
     }
 }

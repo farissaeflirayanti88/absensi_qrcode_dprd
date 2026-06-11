@@ -1,207 +1,183 @@
 <?php
 
 use Illuminate\Support\Facades\Route;
-use Illuminate\Support\Facades\DB;
-use App\Models\User;
-use App\Models\Event;
-use App\Models\Participant;
-use App\Models\Attendance;
 use App\Http\Controllers\AuthController;
 use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\EventController;
 use App\Http\Controllers\AttendanceController;
 use App\Http\Controllers\ParticipantController;
 use App\Http\Controllers\ProfileController;
-
-
-/*
-|--------------------------------------------------------------------------
-| Debug Routes
-|--------------------------------------------------------------------------
-*/
-
-Route::get('/test-db', function () {
-    try {
-        DB::connection()->getPdo();
-        echo "✓ Database connected<br>";
-        echo "Users: " . User::count() . "<br>";
-        echo "Events: " . Event::count() . "<br>";
-        echo "Participants: " . Participant::count() . "<br>";
-        echo "Attendance: " . Attendance::count() . "<br>";
-    } catch (\Exception $e) {
-        echo "Database error: " . $e->getMessage();
-    }
-});
-
-
-Route::get('/test-qr/{event}', function ($eventId) {
-    $event = Event::find($eventId);
-    if (!$event) {
-        return 'Event tidak ditemukan';
-    }
-
-    $url = route('attendance.form.public', ['event' => $eventId]);
-
-    return response()->json([
-        'event' => $event->event_name,
-        'attendance_url' => $url,
-        'qr_urls' => [
-            'google' => "https://chart.googleapis.com/chart?chs=300x300&cht=qr&chl=" . urlencode($url),
-            'qrserver' => "https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=" . urlencode($url),
-            'quickchart' => "https://quickchart.io/qr?text=" . urlencode($url),
-        ]
-    ]);
-});
-
+use App\Http\Controllers\ActivityLogController;
 
 /*
 |--------------------------------------------------------------------------
-| Authentication
+| PUBLIC ROUTES (NO AUTH)
 |--------------------------------------------------------------------------
 */
 
+// Authentication Routes
 Route::get('/login', [AuthController::class, 'showLogin'])->name('login');
 Route::post('/login', [AuthController::class, 'login']);
 
-
-/*
-|--------------------------------------------------------------------------
-| PUBLIC ROUTE – FORM ABSENSI (TANPA LOGIN)
-|--------------------------------------------------------------------------
-*/
-
+// Public Attendance Routes (for participants scanning QR)
 Route::prefix('attendance')->name('attendance.')->group(function () {
-
-    // 🟢 Tampilkan form absensi
-    Route::get('/{event}/form', [AttendanceController::class, 'showForm'])
-         ->name('form.public')
-         ->withoutMiddleware('auth')
-         ->where('event', '[0-9]+');
-
-    // 🟢 Submit form absensi
-    Route::post('/{event}/form', [AttendanceController::class, 'store'])
-         ->name('store.public')
-         ->withoutMiddleware('auth')
-         ->where('event', '[0-9]+');
-
-    // 🟢 Halaman sukses absensi
-    Route::get('/{event}/success/{attendance}', [AttendanceController::class, 'success'])
-         ->name('success')
-         ->withoutMiddleware('auth')
-         ->where([
-             'event' => '[0-9]+',
-             'attendance' => '[0-9]+',
-         ]);
+    Route::get('/form/{event}', [AttendanceController::class, 'showForm'])->name('form.public');
+    Route::post('/store/{event}', [AttendanceController::class, 'store'])->name('store.public');
+    Route::get('/success/{event}/{attendance}', [AttendanceController::class, 'success'])->name('success');
+    Route::get('/scan/{qr_hash}', [AttendanceController::class, 'showFormByHash'])->name('scan.qr');
+    Route::post('/submit/{qr_hash}', [AttendanceController::class, 'submitByHash'])->name('submit.qr');
 });
 
-
-/*
-|--------------------------------------------------------------------------
-| QR Code Redirect
-|--------------------------------------------------------------------------
-*/
-
+// QR Code Redirect Route
 Route::get('/qrcode/{event}', function ($eventId) {
-    $event = Event::find($eventId);
-    if (!$event) {
-        abort(404, 'Event tidak ditemukan');
-    }
-    return redirect()->route('attendance.form.public', $event->id);
+    return redirect()->route('attendance.form.public', $eventId);
 })->name('qrcode.redirect');
 
+// QR Code dengan hash
+Route::get('/absensi/{qr_hash}', [AttendanceController::class, 'showFormByHash'])->name('attendance.form.byhash');
+Route::post('/absensi/{qr_hash}', [AttendanceController::class, 'submitByHash'])->name('attendance.submit.byhash');
+
+// QR Code Generate
+Route::post('events/{event}/qr/generate', [EventController::class, 'generateQRCode'])->name('events.qr.generate');
+
+// Calendar API
+Route::get('api/calendar-events', [EventController::class, 'getCalendarEvents'])->name('events.calendar.data');
 
 /*
 |--------------------------------------------------------------------------
-| PROTECTED ROUTES (HARUS LOGIN)
+| PROTECTED ROUTES (AUTH REQUIRED)
 |--------------------------------------------------------------------------
 */
-
 Route::middleware(['auth'])->group(function () {
 
+    // Logout
     Route::post('/logout', [AuthController::class, 'logout'])->name('logout');
 
     // Dashboard
     Route::get('/dashboard', [DashboardController::class, 'index'])->name('dashboard');
-
-    // Profile
-    Route::get('/profile', [ProfileController::class, 'edit'])->name('profile.edit');
-    Route::put('/profile', [ProfileController::class, 'update'])->name('profile.update');
-    Route::put('/profile/password', [ProfileController::class, 'updatePassword'])->name('profile.password');
-
+    Route::redirect('/', '/dashboard');
+    Route::prefix('dashboard')->name('dashboard.')->group(function () {
+        Route::get('/statistics', [DashboardController::class, 'getStatistics'])->name('statistics');
+        Route::get('/chart-data', [DashboardController::class, 'getChartData'])->name('chart.data');
+    });
 
     /*
     |--------------------------------------------------------------------------
-    | EVENT MANAGEMENT
+    | EVENTS ROUTES
+    | ✅ Semua static route di atas route {event}
     |--------------------------------------------------------------------------
     */
+    Route::controller(EventController::class)->prefix('events')->name('events.')->group(function () {
 
-    Route::prefix('events')->name('events.')->group(function () {
-        Route::get('/', [EventController::class, 'index'])->name('index');
-        Route::get('/create', [EventController::class, 'create'])->name('create');
-        Route::post('/', [EventController::class, 'store'])->name('store');
-        Route::get('/{event}', [EventController::class, 'show'])->name('show');
-        Route::get('/{event}/edit', [EventController::class, 'edit'])->name('edit');
-        Route::put('/{event}', [EventController::class, 'update'])->name('update');
-        Route::delete('/{event}', [EventController::class, 'destroy'])->name('destroy');
+        // STATIC ROUTES — di atas {event}
+        Route::get('/', 'index')->name('index');
+        Route::get('/create', 'create')->name('create');
+        Route::post('/', 'store')->name('store');
+        Route::get('/upcoming', 'upcoming')->name('upcoming');
+        Route::get('/past', 'past')->name('past');
+        Route::get('/calendar', 'calendar')->name('calendar');
+        Route::get('/search', 'search')->name('search');
+        Route::get('/archived', 'archived')->name('archived');
+        Route::post('/bulk-actions', 'bulkActions')->name('bulk-actions');
 
-        Route::get('/{event}/qr-code', [EventController::class, 'generateQRCode'])->name('qr-code');
-        Route::get('/{event}/attendances', [EventController::class, 'attendances'])->name('attendances');
-
-        Route::post('/{event}/toggle-status', [EventController::class, 'toggleStatus'])->name('toggle-status');
+        // PARAMETER ROUTES — di bawah static
+        Route::get('/{event}/detail', 'show')->name('show');
+        Route::get('/{event}/edit', 'edit')->name('edit');
+        Route::put('/{event}', 'update')->name('update');
+        Route::delete('/{event}', 'destroy')->name('destroy');
+        Route::get('/{event}/qr', 'qrPage')->name('qr.page');
+        Route::post('/{event}/qr/refresh', 'refreshQRCode')->name('qr.refresh');
+        Route::post('/{event}/toggle-status', 'toggleStatus')->name('toggle-status');
+        Route::get('/{event}/attendances', 'attendances')->name('attendances');
+        Route::get('/{event}/export', 'export')->name('export');
+        Route::get('/{event}/print', 'print')->name('print');
+        Route::get('/{event}/duplicate', 'duplicate')->name('duplicate');
+        Route::get('/{event}/statistics', 'analytics')->name('statistics');
+        Route::get('/archived/{event}', 'showArchived')->name('show.archived');
+        Route::post('/{event}/archive', 'archive')->name('archive');
+        Route::post('/{event}/restore', 'restore')->name('restore');
     });
-
 
     /*
     |--------------------------------------------------------------------------
-    | ATTENDANCE MANAGEMENT (ADMIN)
+    | ATTENDANCES ROUTES
+    | ✅ Semua static route di atas route {attendance}
     |--------------------------------------------------------------------------
     */
+    Route::controller(AttendanceController::class)->prefix('attendances')->name('attendances.')->group(function () {
 
-    Route::prefix('attendances')->name('attendances.')->group(function () {
-        Route::get('/', [AttendanceController::class, 'index'])->name('index');
-        Route::get('/export', [AttendanceController::class, 'export'])->name('export');
-        Route::get('/export-pdf', [AttendanceController::class, 'exportPdf'])->name('export-pdf');
+        // STATIC ROUTES — di atas {attendance}
+        Route::get('/', 'index')->name('index');
+        Route::get('/export/pdf', 'exportPdf')->name('export.pdf');
+        Route::get('/export/csv', 'exportCsv')->name('export.csv');
+        Route::get('/export', 'exportPdf')->name('export');
+        Route::post('/bulk-delete', 'bulkDelete')->name('bulk-delete');
+        Route::post('/quick-add', 'quickAdd')->name('quick-add');
+        Route::post('/import', 'import')->name('import');
+        Route::get('/import-template', 'downloadTemplate')->name('import.template');
+        Route::post('/add-duplicate-column', 'addDuplicateColumn')->name('add-duplicate-column');
+        Route::post('/identify-duplicates', 'identifyDuplicates')->name('identify.duplicates');
+        Route::delete('/remove-duplicates', 'removeDuplicates')->name('remove.duplicates');
+        Route::get('/duplicates', 'showDuplicates')->name('duplicates');
+        Route::get('/api/statistics', 'getStatistics')->name('statistics.api');
 
-        Route::delete('/{attendance}', [AttendanceController::class, 'destroy'])->name('destroy');
-        Route::get('/{attendance}/edit', [AttendanceController::class, 'edit'])->name('edit');
-        Route::put('/{attendance}', [AttendanceController::class, 'update'])->name('update');
+        // PARAMETER ROUTES — di bawah static
+        Route::get('/{attendance}/edit', 'edit')->name('edit');
+        Route::put('/{attendance}', 'update')->name('update');
+        Route::delete('/{attendance}', 'destroy')->name('destroy');
+        Route::patch('/{attendance}/mark-as-valid', 'markAsValid')->name('mark-as-valid');
     });
-
 
     /*
     |--------------------------------------------------------------------------
-    | PARTICIPANT MANAGEMENT
+    | PARTICIPANTS ROUTES
+    | ✅ Semua static route di atas route {participant}
     |--------------------------------------------------------------------------
     */
-
-    Route::prefix('participants')->name('participants.')->group(function () {
-        Route::get('/', [ParticipantController::class, 'index'])->name('index');
-        Route::get('/{participant}', [ParticipantController::class, 'show'])->name('show');
-        Route::get('/{participant}/edit', [ParticipantController::class, 'edit'])->name('edit');
-        Route::put('/{participant}', [ParticipantController::class, 'update'])->name('update');
-        Route::delete('/{participant}', [ParticipantController::class, 'destroy'])->name('destroy');
+    Route::controller(ParticipantController::class)->prefix('participants')->name('participants.')->group(function () {
+        Route::get('/', 'index')->name('index');
+        Route::get('/{participant}', 'show')->name('show');
+        Route::get('/{participant}/edit', 'edit')->name('edit');
+        Route::put('/{participant}', 'update')->name('update');
+        Route::delete('/{participant}', 'destroy')->name('destroy');
     });
 
+    /*
+    |--------------------------------------------------------------------------
+    | PROFILE ROUTES
+    |--------------------------------------------------------------------------
+    */
+    Route::prefix('profile')->name('profile.')->group(function () {
+        Route::get('/', [ProfileController::class, 'edit'])->name('edit');
+        Route::put('/', [ProfileController::class, 'update'])->name('update');
+        Route::put('/password', [ProfileController::class, 'updatePassword'])->name('password');
+        Route::put('/avatar', [ProfileController::class, 'updateAvatar'])->name('avatar.update');
+        Route::delete('/avatar', [ProfileController::class, 'deleteAvatar'])->name('avatar.delete');
+    });
 
-    // Activity Logs
-    Route::get('/activity-logs', function () {
-        $logs = \App\Models\ActivityLog::with('user')->latest()->paginate(20);
-        return view('activity-logs.index', compact('logs'));
-    })->name('activity-logs.index');
+    /*
+    |--------------------------------------------------------------------------
+    | ACTIVITY LOG ROUTES
+    | ✅ Static route clear-old di atas route {activityLog}
+    |--------------------------------------------------------------------------
+    */
+    Route::controller(ActivityLogController::class)->prefix('activity-logs')->name('activity-logs.')->group(function () {
 
-    // Redirect root → dashboard
-    Route::get('/', function () {
-        return redirect('/dashboard');
+        // STATIC ROUTES — di atas {activityLog}
+        Route::get('/', 'index')->name('index');
+        Route::post('/clear-old', 'clearOldLogs')->name('clear-old');
+
+        // PARAMETER ROUTES — di bawah static
+        Route::get('/{activityLog}', 'show')->name('show');
+        Route::delete('/{activityLog}', 'destroy')->name('destroy');
     });
 });
 
-
 /*
 |--------------------------------------------------------------------------
-| Fallback
+| FALLBACK ROUTE
 |--------------------------------------------------------------------------
 */
-
 Route::fallback(function () {
     return auth()->check() ? redirect('/dashboard') : redirect('/login');
 });

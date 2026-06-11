@@ -12,6 +12,8 @@ class ActivityLog extends Model
     protected $fillable = [
         'user_id',
         'activity',
+        'ip_address',
+        'user_agent',
     ];
 
     // Nonaktifkan timestamps karena tidak ada updated_at

@@ -1,2 +1,9 @@
 User-agent: *
-Disallow:
+Disallow: /absensi-qr-dprd/public/dashboard
+Disallow: /absensi-qr-dprd/public/events
+Disallow: /absensi-qr-dprd/public/attendances
+Disallow: /absensi-qr-dprd/public/profile
+Disallow: /absensi-qr-dprd/public/activity-logs
+Disallow: /absensi-qr-dprd/public/participants
+Allow: /
+Allow: /absensi-qr-dprd/public/absensi/
